@@ -8,6 +8,6 @@
 
 anndataset_root="${ANNDATASET_ROOT:-/home/zwan/ANNlib/test/ANNdataset}"
 annlib_test_dir="${ANNLIB_TEST_DIR:-/home/zwan/ANNlib/test}"
-artifact_root="${ARTIFACT_ROOT:-/data/zwn018/TimeStampANN/point_timerange_ann}"
+artifact_root="${ARTIFACT_ROOT:-/data/zwan018/TimeStampANN/point_timerange_ann}"
 cache_root="${CACHE_ROOT:-/data/zwan018/TimeStampANN/baseline_cache}"
 result_root="${RESULT_ROOT:-${repo_root}/results}"
