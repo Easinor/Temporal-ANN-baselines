@@ -2,8 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-annlib_test_dir="${ANNLIB_TEST_DIR:?ANNLIB_TEST_DIR must be set}"
-artifact_root="${ARTIFACT_ROOT:?ARTIFACT_ROOT must be set}"
+annlib_test_dir="${ANNLIB_TEST_DIR:?ANNLIB_TEST_DIR not set — check config.sh}"
+artifact_root="${ARTIFACT_ROOT:?ARTIFACT_ROOT not set — check config.sh}"
 
 if [[ $# -gt 0 && "${1:-}" == "--help" ]]; then
   cat <<'EOF'
