@@ -10,7 +10,6 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 source "${script_dir}/datasets.sh"
 
 python_bin="${PYTHON_BIN:-python3}"
-annlib_dir="${ANNLIB_DIR:-/home/zwan/ANNlib}"
 thread_list="${THREAD_LIST:-1 2 4 8 16 32 48 96}"
 
 # bigann1M dataset spec (first entry in DATASETS)

@@ -9,7 +9,6 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 source "${script_dir}/datasets.sh"
 
 python_bin="${PYTHON_BIN:-python3}"
-annlib_test_dir="${ANNLIB_TEST_DIR:-/home/zwan/ANNlib/test}"
 
 mkdir -p "${artifact_root}" "${sorted_root}" "${result_root}" "${log_root}"
 
