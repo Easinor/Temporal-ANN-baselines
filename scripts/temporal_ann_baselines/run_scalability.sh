@@ -27,7 +27,7 @@ mkdir -p "${rf_result_root}"
 
 echo "=== RangeFilteredANN scalability ==="
 for threads in ${thread_list}; do
-  cache_dir="${repo_root}/cache/rangefilteredann/scalability/threads${threads}"
+  cache_dir="${cache_root}/rangefilteredann/scalability/threads${threads}"
   rm -rf "${cache_dir}"
 
   echo "  threads=${threads}"

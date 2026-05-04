@@ -13,7 +13,7 @@ for entry in "${DATASETS[@]}"; do
   IFS='|' read -r tag dataset type dist max_points <<< "${entry}"
   [[ -n "${tag}" ]] || continue
 
-  cache_dir="${repo_root}/cache/unify/${tag}"
+  cache_dir="${cache_root}/unify/${tag}"
   rm -rf "${cache_dir}"
   mkdir -p "${log_root}/${tag}"
 

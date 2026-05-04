@@ -13,7 +13,7 @@ for entry in "${DATASETS[@]}"; do
   IFS='|' read -r tag dataset type dist max_points <<< "${entry}"
   [[ -n "${tag}" ]] || continue
 
-  cache_dir="${repo_root}/cache/rangefilteredann/${tag}"
+  cache_dir="${cache_root}/rangefilteredann/${tag}"
   rm -rf "${cache_dir}"
   mkdir -p "${log_root}/${tag}"
 

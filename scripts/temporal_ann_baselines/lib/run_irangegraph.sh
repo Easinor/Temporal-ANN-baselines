@@ -14,7 +14,7 @@ for entry in "${DATASETS[@]}"; do
   [[ -n "${tag}" ]] || continue
 
   sorted_dir="${sorted_root}/${tag}"
-  index_dir="${repo_root}/iRangeGraph/index/${tag}"
+  index_dir="${cache_root}/irangegraph/${tag}"
   index_path="${index_dir}/irangegraph.bin"
   time_file="${index_dir}/build_seconds.txt"
   mkdir -p "${index_dir}" "${log_root}/${tag}"

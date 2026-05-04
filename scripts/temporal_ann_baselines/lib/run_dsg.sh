@@ -14,7 +14,7 @@ for entry in "${DATASETS[@]}"; do
   [[ -n "${tag}" ]] || continue
 
   sorted_dir="${sorted_root}/${tag}"
-  index_dir="${repo_root}/Dynamic-Range-Filtering-ANNS/index/static/${tag}"
+  index_dir="${cache_root}/dsg/${tag}"
   index_path="${index_dir}/dsg.index"
   time_file="${index_dir}/build_seconds.txt"
   mkdir -p "${index_dir}" "${log_root}/${tag}"
