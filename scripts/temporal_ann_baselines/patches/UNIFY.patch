@@ -1,0 +1,99 @@
+diff --git a/benchmark/code/alg_hannlib.py b/benchmark/code/alg_hannlib.py
+index 064c693..38654f5 100644
+--- a/benchmark/code/alg_hannlib.py
++++ b/benchmark/code/alg_hannlib.py
+@@ -9,6 +9,17 @@ import hannlib
+ # import hannlib
+ 
+ 
++def _default_thread_count() -> int:
++    for key in ("THREADS", "OMP_NUM_THREADS"):
++        value = os.environ.get(key)
++        if value:
++            try:
++                return max(1, int(value))
++            except ValueError:
++                pass
++    return max(1, os.cpu_count() or 1)
++
++
+ class HannLib(BaseANN):
+     def __init__(self, metric, method_param):
+         self.metric = {"angular": "cosine", "euclidean": "l2"}[metric]
+@@ -36,6 +47,7 @@ class HannLib(BaseANN):
+ 
+         print("init index")
+         self.p = hannlib.HybridIndex(space=self.metric, dim=dim)
++        self.p.set_num_threads(_default_thread_count())
+         self.p.init_index(
+             slot_ranges=slot_ranges,
+             max_elements=n_base,
+@@ -45,7 +57,6 @@ class HannLib(BaseANN):
+         print(f"Adding {len(X)} vectors, {len(scalars)} scalars.")
+         data_labels = np.arange(len(X))
+         self.p.add_items(np.asarray(X), scalars, data_labels)
+-        self.p.set_num_threads(1)
+         print("add items done")
+ 
+     def set_query_arguments(self, arg_dict: dict):
+@@ -71,6 +82,10 @@ class HannLib(BaseANN):
+         I, D = self.p.hybrid_query(q, interval, n)
+         return I
+ 
++    def batch_hybrid_query(self, X, ranges, n, num_threads=-1):
++        I, D = self.p.hybrid_query_batch(X, ranges, n, num_threads)
++        return I
++
+     def freeIndex(self):
+         del self.p
+ 
+@@ -81,4 +96,5 @@ class HannLib(BaseANN):
+         # self.freeIndex()
+         n_base, dim = X.shape
+         self.p = hannlib.HybridIndex(space=self.metric, dim=dim)
++        self.p.set_num_threads(_default_thread_count())
+         self.p.load_index(location, n_base)
+diff --git a/benchmark/code/alg_hnswlib.py b/benchmark/code/alg_hnswlib.py
+index cf4679a..98695a8 100644
+--- a/benchmark/code/alg_hnswlib.py
++++ b/benchmark/code/alg_hnswlib.py
+@@ -5,6 +5,17 @@ import numpy as np
+ from alg_base import BaseANN
+ 
+ 
++def _default_thread_count() -> int:
++    for key in ("THREADS", "OMP_NUM_THREADS"):
++        value = os.environ.get(key)
++        if value:
++            try:
++                return max(1, int(value))
++            except ValueError:
++                pass
++    return max(1, os.cpu_count() or 1)
++
++
+ class HnswLib(BaseANN):
+     def __init__(self, metric, method_param):
+         self.metric = {"angular": "cosine", "euclidean": "l2"}[metric]
+@@ -20,6 +31,7 @@ class HnswLib(BaseANN):
+         self.scalars = scalars
+         # Only l2 is supported currently
+         self.p = hnswlib.Index(space=self.metric, dim=len(X[0]))
++        self.p.set_num_threads(_default_thread_count())
+         self.p.init_index(
+             max_elements=len(X),
+             ef_construction=self.method_param["efConstruction"],
+@@ -27,7 +39,6 @@ class HnswLib(BaseANN):
+         )
+         data_labels = np.arange(len(X))
+         self.p.add_items(np.asarray(X), data_labels)
+-        self.p.set_num_threads(1)
+ 
+     def set_query_arguments(self, arg_dict: dict):
+         self.p.set_ef(arg_dict["ef"])
+@@ -59,4 +70,5 @@ class HnswLib(BaseANN):
+         # self.freeIndex()
+         n_base, dim = X.shape
+         self.p = hnswlib.Index(space=self.metric, dim=dim)
++        self.p.set_num_threads(_default_thread_count())
+         self.p.load_index(location, n_base)

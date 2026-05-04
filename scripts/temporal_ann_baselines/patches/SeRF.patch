@@ -1,0 +1,289 @@
+diff --git a/benchmark/CMakeLists.txt b/benchmark/CMakeLists.txt
+index 383004a..7f00e85 100644
+--- a/benchmark/CMakeLists.txt
++++ b/benchmark/CMakeLists.txt
+@@ -17,4 +17,10 @@ add_executable(serf_arbitrary serf_arbitrary.cc)
+ target_link_libraries(serf_arbitrary UTIL)
+ target_compile_options(serf_arbitrary PRIVATE -Wall ${OpenMP_CXX_FLAGS})
+ target_link_libraries(serf_arbitrary ${OpenMP_CXX_FLAGS})
+-target_link_libraries(serf_arbitrary OpenMP::OpenMP_CXX)
+\ No newline at end of file
++target_link_libraries(serf_arbitrary OpenMP::OpenMP_CXX)
++
++add_executable(serf_annlib serf_annlib.cc)
++target_link_libraries(serf_annlib UTIL)
++target_compile_options(serf_annlib PRIVATE -Wall ${OpenMP_CXX_FLAGS})
++target_link_libraries(serf_annlib ${OpenMP_CXX_FLAGS})
++target_link_libraries(serf_annlib OpenMP::OpenMP_CXX)
+diff --git a/benchmark/serf_annlib.cc b/benchmark/serf_annlib.cc
+new file mode 100644
+index 0000000..7affda7
+--- /dev/null
++++ b/benchmark/serf_annlib.cc
+@@ -0,0 +1,266 @@
++#include <algorithm>
++#include <cstdint>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "data_wrapper.h"
++#include "index_base.h"
++#include "segment_graph_2d.h"
++#include "utils.h"
++
++using std::pair;
++using std::string;
++using std::vector;
++
++namespace {
++
++struct Config {
++  string data_path;
++  string query_path;
++  string artifacts_dir;
++  string output_path;
++  int data_size = 0;
++  int query_k = 10;
++  vector<int> ranges;
++  vector<int> index_k_list{16};
++  vector<int> ef_construction_list{150};
++  vector<int> ef_max_list{300};
++  vector<int> ef_search_list{16, 32, 64, 96, 128, 160, 224, 256};
++};
++
++vector<int> parseList(const string& text) {
++  vector<int> values;
++  std::stringstream ss(text);
++  string token;
++  while (std::getline(ss, token, ',')) {
++    if (!token.empty()) values.emplace_back(std::stoi(token));
++  }
++  return values;
++}
++
++Config parseArgs(int argc, char** argv) {
++  Config cfg;
++  for (int i = 1; i < argc; ++i) {
++    string arg = argv[i];
++    auto require_value = [&](const char* flag) -> const char* {
++      if (i + 1 >= argc) throw std::invalid_argument(string("Missing value for ") + flag);
++      return argv[++i];
++    };
++    if (arg == "--data-path") cfg.data_path = require_value("--data-path");
++    else if (arg == "--query-path") cfg.query_path = require_value("--query-path");
++    else if (arg == "--artifacts-dir") cfg.artifacts_dir = require_value("--artifacts-dir");
++    else if (arg == "--output") cfg.output_path = require_value("--output");
++    else if (arg == "--data-size") cfg.data_size = std::stoi(require_value("--data-size"));
++    else if (arg == "--k") cfg.query_k = std::stoi(require_value("--k"));
++    else if (arg == "--ranges") cfg.ranges = parseList(require_value("--ranges"));
++    else if (arg == "--index-k-list") cfg.index_k_list = parseList(require_value("--index-k-list"));
++    else if (arg == "--ef-con-list") cfg.ef_construction_list = parseList(require_value("--ef-con-list"));
++    else if (arg == "--ef-max-list") cfg.ef_max_list = parseList(require_value("--ef-max-list"));
++    else if (arg == "--ef-search-list") cfg.ef_search_list = parseList(require_value("--ef-search-list"));
++    else if (arg == "-h" || arg == "--help") throw std::invalid_argument("usage");
++  }
++  if (cfg.data_path.empty() || cfg.query_path.empty() || cfg.artifacts_dir.empty() || cfg.output_path.empty()) {
++    throw std::invalid_argument("data-path, query-path, artifacts-dir, and output are required.");
++  }
++  if (cfg.data_size <= 0) {
++    throw std::invalid_argument("data-size must be positive.");
++  }
++  if (cfg.ranges.empty()) {
++    throw std::invalid_argument("ranges is required.");
++  }
++  return cfg;
++}
++
++void printUsage() {
++  std::cout << "Usage: serf_annlib --data-path <base_sorted.bin> --query-path <queries.bin> "
++               "--artifacts-dir <dir> --output <tsv> --data-size <N> --ranges <r1,r2,...> "
++               "[--index-k-list 16] [--ef-con-list 150] [--ef-max-list 300] "
++               "[--ef-search-list 16,32,64,...]\n";
++}
++
++vector<vector<float>> readDense(const string& path) {
++  std::ifstream in(path, std::ios::binary);
++  if (!in.is_open()) throw std::runtime_error("Cannot open vector file: " + path);
++  uint32_t count = 0;
++  uint32_t dim = 0;
++  in.read(reinterpret_cast<char*>(&count), sizeof(uint32_t));
++  in.read(reinterpret_cast<char*>(&dim), sizeof(uint32_t));
++  vector<vector<float>> rows(count, vector<float>(dim));
++  for (uint32_t i = 0; i < count; ++i) {
++    in.read(reinterpret_cast<char*>(rows[i].data()), sizeof(float) * dim);
++  }
++  return rows;
++}
++
++vector<pair<int, int>> readRanges(const string& path) {
++  std::ifstream in(path, std::ios::binary);
++  if (!in.is_open()) throw std::runtime_error("Cannot open range file: " + path);
++  uint32_t count = 0;
++  in.read(reinterpret_cast<char*>(&count), sizeof(uint32_t));
++  vector<pair<int, int>> bounds(count);
++  for (uint32_t i = 0; i < count; ++i) {
++    int32_t l = 0;
++    int32_t r = 0;
++    in.read(reinterpret_cast<char*>(&l), sizeof(int32_t));
++    in.read(reinterpret_cast<char*>(&r), sizeof(int32_t));
++    bounds[i] = {l, r};
++  }
++  return bounds;
++}
++
++vector<vector<int>> readGroundtruth(const string& path) {
++  std::ifstream in(path, std::ios::binary);
++  if (!in.is_open()) throw std::runtime_error("Cannot open groundtruth file: " + path);
++  uint32_t count = 0;
++  uint32_t topk = 0;
++  in.read(reinterpret_cast<char*>(&count), sizeof(uint32_t));
++  in.read(reinterpret_cast<char*>(&topk), sizeof(uint32_t));
++  vector<vector<int>> rows(count, vector<int>(topk));
++  for (uint32_t i = 0; i < count; ++i) {
++    in.read(reinterpret_cast<char*>(rows[i].data()), sizeof(int32_t) * topk);
++  }
++  return rows;
++}
++
++double rowRecall(const vector<int>& truth, const vector<int>& pred, size_t* valid_count) {
++  size_t valid = 0;
++  size_t hits = 0;
++  for (int one : truth) {
++    if (one < 0) continue;
++    ++valid;
++    if (std::find(pred.begin(), pred.end(), one) != pred.end()) ++hits;
++  }
++  *valid_count = valid;
++  if (valid == 0) return 0.0;
++  return static_cast<double>(hits) / static_cast<double>(valid);
++}
++
++std::uint64_t estimateIndexBytes(const SeRF::IndexSegmentGraph2D& index) {
++  std::uint64_t bytes = static_cast<std::uint64_t>(index.directed_indexed_arr.capacity()) *
++                        sizeof(SeRF::DirectedSegNeighbors);
++  for (const auto& node : index.directed_indexed_arr) {
++    bytes += static_cast<std::uint64_t>(node.forward_nns.capacity()) *
++             sizeof(SeRF::OneSegmentNeighbors);
++    for (const auto& batch : node.forward_nns) {
++      bytes += static_cast<std::uint64_t>(batch.nns_id.capacity()) * sizeof(int);
++    }
++    bytes += static_cast<std::uint64_t>(node.reverse_nns.capacity()) * sizeof(int);
++  }
++  return bytes;
++}
++
++std::uint64_t fileSizeBytes(const std::string& path) {
++  std::ifstream in(path, std::ios::binary | std::ios::ate);
++  if (!in.is_open()) return 0;
++  return static_cast<std::uint64_t>(in.tellg());
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++  try {
++    const Config cfg = parseArgs(argc, argv);
++    auto base = readDense(cfg.data_path);
++    auto queries = readDense(cfg.query_path);
++    DataWrapper data_wrapper(static_cast<int>(queries.size()), cfg.query_k, "annlib", cfg.data_size);
++    data_wrapper.nodes = std::move(base);
++    data_wrapper.querys = std::move(queries);
++    data_wrapper.data_dim = data_wrapper.nodes.empty() ? 0 : data_wrapper.nodes.front().size();
++
++    base_hnsw::L2Space ss(data_wrapper.data_dim);
++
++    std::ofstream out(cfg.output_path);
++    if (!out.is_open()) throw std::runtime_error("Cannot open output file: " + cfg.output_path);
++    out << "baseline\trange\tindex_k\tef_construction\tef_max\tbuild_seconds\tspace_usage_bytes\tspace_usage_source\tef_search\trecall\tavg_ms\tqps\tkpqs\tavg_comps\tvalid_queries\n";
++    out << std::fixed << std::setprecision(6);
++
++    for (int index_k : cfg.index_k_list) {
++      for (int ef_max : cfg.ef_max_list) {
++        for (int ef_construction : cfg.ef_construction_list) {
++          BaseIndex::IndexParams i_params(index_k, ef_construction, ef_construction, ef_max);
++          i_params.recursion_type = BaseIndex::IndexParams::MAX_POS;
++
++          SeRF::IndexSegmentGraph2D index(&ss, &data_wrapper);
++          BaseIndex::SearchInfo search_info(&data_wrapper, &i_params, "SeRF_2D", "annlib");
++          index.buildIndex(&i_params);
++          const double build_seconds = index.index_info == nullptr ? 0.0 : index.index_info->index_time;
++          const std::string index_path = cfg.artifacts_dir + "/serf_k" + std::to_string(index_k) +
++                                         "_efcon" + std::to_string(ef_construction) +
++                                         "_efmax" + std::to_string(ef_max) + ".bin";
++          index.save(index_path);
++          std::uint64_t index_bytes = fileSizeBytes(index_path);
++          const char* space_usage_source = "index_file_bytes";
++          if (index_bytes == 0) {
++            index_bytes = estimateIndexBytes(index);
++            space_usage_source = "estimated_memory_bytes";
++          }
++
++          for (int width : cfg.ranges) {
++            const auto bounds = readRanges(cfg.artifacts_dir + "/range" + std::to_string(width) + ".ranges.bin");
++            const auto groundtruth = readGroundtruth(cfg.artifacts_dir + "/range" + std::to_string(width) + ".gt.bin");
++            if (bounds.size() != data_wrapper.querys.size() || groundtruth.size() != data_wrapper.querys.size()) {
++              throw std::runtime_error("Query count mismatch for range " + std::to_string(width));
++            }
++
++            BaseIndex::SearchParams s_params;
++            s_params.query_K = cfg.query_k;
++
++            for (int ef_search : cfg.ef_search_list) {
++              s_params.search_ef = ef_search;
++              double recall_acc = 0.0;
++              double time_acc = 0.0;
++              double comp_acc = 0.0;
++              size_t valid_queries = 0;
++
++              for (size_t qid = 0; qid < data_wrapper.querys.size(); ++qid) {
++                const auto range = bounds[qid];
++                if (range.first > range.second) continue;
++
++                size_t valid_truth = 0;
++                for (int one : groundtruth[qid]) {
++                  if (one >= 0) ++valid_truth;
++                }
++                if (valid_truth == 0) continue;
++
++                s_params.query_range = static_cast<unsigned>(range.second - range.first + 1);
++                auto res = index.rangeFilteringSearchOutBound(&s_params, &search_info, data_wrapper.querys[qid], range);
++                size_t counted_truth = 0;
++                recall_acc += rowRecall(groundtruth[qid], res, &counted_truth);
++                time_acc += search_info.internal_search_time;
++                comp_acc += static_cast<double>(search_info.total_comparison);
++                ++valid_queries;
++              }
++
++              const double avg_ms = valid_queries == 0 ? 0.0 : (time_acc * 1e3 / static_cast<double>(valid_queries));
++              const double qps = time_acc <= 0.0 ? 0.0 : (static_cast<double>(valid_queries) / time_acc);
++              const double kpqs = qps / 1000.0;
++              const double avg_comps = valid_queries == 0 ? 0.0 : (comp_acc / static_cast<double>(valid_queries));
++              const double recall = valid_queries == 0 ? 0.0 : (recall_acc / static_cast<double>(valid_queries));
++
++              out << "serf_2d\t" << width << '\t' << index_k << '\t'
++                  << ef_construction << '\t' << ef_max << '\t'
++                  << build_seconds << '\t' << index_bytes << '\t' << space_usage_source << '\t'
++                  << ef_search << '\t' << recall << '\t' << avg_ms << '\t' << qps << '\t' << kpqs << '\t'
++                  << avg_comps << '\t' << valid_queries << '\n';
++            }
++          }
++        }
++      }
++    }
++
++    return 0;
++  } catch (const std::invalid_argument& ex) {
++    printUsage();
++    std::cerr << "Argument error: " << ex.what() << std::endl;
++    return 1;
++  } catch (const std::exception& ex) {
++    std::cerr << "SeRF run failed: " << ex.what() << std::endl;
++    return 1;
++  }
++}

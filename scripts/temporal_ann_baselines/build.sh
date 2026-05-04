@@ -3,9 +3,26 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+patch_dir="${repo_root}/scripts/temporal_ann_baselines/patches"
 python_bin="${PYTHON_BIN:-python3}"
 rangefiltered_repo="${RANGEFILTERED_REPO:-${repo_root}/RangeFilteredANN}"
 unify_repo="${UNIFY_REPO:-${repo_root}/UNIFY}"
+
+# --- Apply integration patches to submodules ---
+
+apply_patch() {
+  local repo_dir="$1"
+  local patch="${patch_dir}/$(basename "${repo_dir}").patch"
+  [[ -s "${patch}" ]] || return 0
+  echo "Applying patch to $(basename "${repo_dir}")..."
+  git -C "${repo_dir}" apply --check "${patch}" 2>/dev/null && \
+    git -C "${repo_dir}" apply "${patch}" || \
+    echo "  (patch already applied or not needed)"
+}
+
+for sub in RangeFilteredANN UNIFY Dynamic-Range-Filtering-ANNS SeRF iRangeGraph; do
+  apply_patch "${repo_root}/${sub}"
+done
 
 pybind11_cmakedir="$("${python_bin}" -m pybind11 --cmakedir)"
 python_ext_suffix="$("${python_bin}" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")')"

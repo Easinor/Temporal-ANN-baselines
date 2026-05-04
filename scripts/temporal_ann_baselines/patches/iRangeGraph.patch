@@ -1,0 +1,234 @@
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 730ece3..3fb0948 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -1,3 +1,4 @@
+ add_executable(buildindex buildindex.cpp)
+ add_executable(search search.cpp)
+-add_executable(search_multi search_multi.cpp)
+\ No newline at end of file
++add_executable(search_annlib search_annlib.cpp)
++add_executable(search_multi search_multi.cpp)
+diff --git a/tests/search_annlib.cpp b/tests/search_annlib.cpp
+new file mode 100644
+index 0000000..27ef563
+--- /dev/null
++++ b/tests/search_annlib.cpp
+@@ -0,0 +1,217 @@
++#include <algorithm>
++#include <cstdint>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++#include "iRG_search.h"
++
++namespace {
++
++struct Config {
++    std::string data_path;
++    std::string query_path;
++    std::string artifacts_dir;
++    std::string index_file;
++    std::string output_path;
++    std::string space_usage_source = "unknown";
++    int M = 16;
++    int query_k = 10;
++    double build_seconds = 0.0;
++    std::uint64_t index_bytes = 0;
++    std::vector<int> ranges;
++    std::vector<int> ef_list{1700, 1400, 1100, 1000, 900, 800, 700, 600, 500, 400, 300, 250, 200, 180, 160, 140, 120, 100, 90, 80, 70, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10};
++};
++
++std::vector<int> parseList(const std::string &text) {
++    std::vector<int> values;
++    std::stringstream ss(text);
++    std::string token;
++    while (std::getline(ss, token, ',')) {
++        if (!token.empty()) values.emplace_back(std::stoi(token));
++    }
++    return values;
++}
++
++Config parseArgs(int argc, char **argv) {
++    Config cfg;
++    for (int i = 1; i < argc; ++i) {
++        const std::string arg = argv[i];
++        auto require_value = [&](const char *flag) -> const char * {
++            if (i + 1 >= argc) throw std::invalid_argument(std::string("Missing value for ") + flag);
++            return argv[++i];
++        };
++        if (arg == "--data-path") cfg.data_path = require_value("--data-path");
++        else if (arg == "--query-path") cfg.query_path = require_value("--query-path");
++        else if (arg == "--artifacts-dir") cfg.artifacts_dir = require_value("--artifacts-dir");
++        else if (arg == "--index-file") cfg.index_file = require_value("--index-file");
++        else if (arg == "--output") cfg.output_path = require_value("--output");
++        else if (arg == "--M") cfg.M = std::stoi(require_value("--M"));
++        else if (arg == "--k") cfg.query_k = std::stoi(require_value("--k"));
++        else if (arg == "--build-seconds") cfg.build_seconds = std::stod(require_value("--build-seconds"));
++        else if (arg == "--index-bytes") cfg.index_bytes = static_cast<std::uint64_t>(std::stoull(require_value("--index-bytes")));
++        else if (arg == "--space-usage-source") cfg.space_usage_source = require_value("--space-usage-source");
++        else if (arg == "--ranges") cfg.ranges = parseList(require_value("--ranges"));
++        else if (arg == "--ef-list") cfg.ef_list = parseList(require_value("--ef-list"));
++        else if (arg == "-h" || arg == "--help") throw std::invalid_argument("usage");
++    }
++    if (cfg.data_path.empty() || cfg.query_path.empty() || cfg.artifacts_dir.empty() || cfg.index_file.empty() || cfg.output_path.empty()) {
++        throw std::invalid_argument("data-path, query-path, artifacts-dir, index-file, and output are required.");
++    }
++    if (cfg.ranges.empty()) {
++        throw std::invalid_argument("ranges is required.");
++    }
++    return cfg;
++}
++
++void printUsage() {
++    std::cout << "Usage: search_annlib --data-path <base_sorted.bin> --query-path <queries.bin> "
++                 "--artifacts-dir <dir> --index-file <index.bin> --output <tsv> "
++                 "--ranges <r1,r2,...> [--M 16] [--k 10] [--ef-list 1700,1400,...]\n";
++}
++
++std::vector<std::pair<int, int>> readRanges(const std::string &path) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in.is_open()) throw std::runtime_error("Cannot open range file: " + path);
++    uint32_t count = 0;
++    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
++    std::vector<std::pair<int, int>> bounds(count);
++    for (uint32_t i = 0; i < count; ++i) {
++        int32_t l = 0;
++        int32_t r = 0;
++        in.read(reinterpret_cast<char *>(&l), sizeof(int32_t));
++        in.read(reinterpret_cast<char *>(&r), sizeof(int32_t));
++        bounds[i] = {l, r};
++    }
++    return bounds;
++}
++
++std::vector<std::vector<int>> readGroundtruth(const std::string &path) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in.is_open()) throw std::runtime_error("Cannot open groundtruth file: " + path);
++    uint32_t count = 0;
++    uint32_t topk = 0;
++    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
++    in.read(reinterpret_cast<char *>(&topk), sizeof(uint32_t));
++    std::vector<std::vector<int>> rows(count, std::vector<int>(topk));
++    for (uint32_t i = 0; i < count; ++i) {
++        in.read(reinterpret_cast<char *>(rows[i].data()), sizeof(int32_t) * topk);
++    }
++    return rows;
++}
++
++double rowRecall(const std::vector<int> &truth, const std::vector<int> &pred, size_t *valid_count) {
++    size_t valid = 0;
++    size_t hits = 0;
++    for (int x : truth) {
++        if (x < 0) continue;
++        ++valid;
++        if (std::find(pred.begin(), pred.end(), x) != pred.end()) ++hits;
++    }
++    *valid_count = valid;
++    if (valid == 0) return 0.0;
++    return static_cast<double>(hits) / static_cast<double>(valid);
++}
++
++}  // namespace
++
++int main(int argc, char **argv) {
++    try {
++        const Config cfg = parseArgs(argc, argv);
++        iRangeGraph::DataLoader storage;
++        storage.query_K = cfg.query_k;
++        storage.LoadQuery(cfg.query_path);
++
++        for (int width : cfg.ranges) {
++            storage.query_range[width] = readRanges(cfg.artifacts_dir + "/range" + std::to_string(width) + ".ranges.bin");
++            storage.groundtruth[width] = readGroundtruth(cfg.artifacts_dir + "/range" + std::to_string(width) + ".gt.bin");
++            if (storage.query_range[width].size() != static_cast<size_t>(storage.query_nb) ||
++                storage.groundtruth[width].size() != static_cast<size_t>(storage.query_nb)) {
++                throw std::runtime_error("Query count mismatch for range " + std::to_string(width));
++            }
++        }
++
++        iRangeGraph::iRangeGraph_Search<float> index(cfg.data_path, cfg.index_file, &storage, cfg.M);
++
++        std::ofstream out(cfg.output_path);
++        if (!out.is_open()) throw std::runtime_error("Cannot open output file: " + cfg.output_path);
++        out << "baseline\trange\tef\tbuild_seconds\tspace_usage_bytes\tspace_usage_source\trecall\tavg_ms\tqps\tkpqs\tavg_dco\tavg_hops\tvalid_queries\n";
++        out << std::fixed << std::setprecision(6);
++
++        for (int width : cfg.ranges) {
++            const auto &bounds = storage.query_range[width];
++            const auto &gt = storage.groundtruth[width];
++
++            for (int ef : cfg.ef_list) {
++                double recall_acc = 0.0;
++                double time_acc = 0.0;
++                size_t valid_queries = 0;
++                index.metric_hops = 0;
++                index.metric_distance_computations = 0;
++
++                for (int i = 0; i < storage.query_nb; ++i) {
++                    const auto [ql, qr] = bounds[i];
++                    if (ql > qr) continue;
++
++                    size_t valid_truth = 0;
++                    for (int x : gt[i]) {
++                        if (x >= 0) ++valid_truth;
++                    }
++                    if (valid_truth == 0) continue;
++
++                    timeval t1, t2;
++                    gettimeofday(&t1, NULL);
++                    std::vector<iRangeGraph::TreeNode *> filterednodes = index.tree->range_filter(index.tree->root, ql, qr);
++                    std::priority_queue<iRangeGraph::PFI> res = index.TopDown_nodeentries_search(
++                        filterednodes,
++                        storage.query_points[i].data(),
++                        ef,
++                        storage.query_K,
++                        ql,
++                        qr,
++                        cfg.M);
++                    gettimeofday(&t2, NULL);
++                    time_acc += GetTime(t1, t2);
++
++                    std::vector<int> pred;
++                    pred.reserve(static_cast<size_t>(storage.query_K));
++                    while (!res.empty()) {
++                        pred.emplace_back(res.top().second);
++                        res.pop();
++                    }
++
++                    size_t counted_truth = 0;
++                    recall_acc += rowRecall(gt[i], pred, &counted_truth);
++                    ++valid_queries;
++                }
++
++                const double avg_ms = valid_queries == 0 ? 0.0 : (time_acc * 1e3 / static_cast<double>(valid_queries));
++                const double qps = time_acc <= 0.0 ? 0.0 : (static_cast<double>(valid_queries) / time_acc);
++                const double kpqs = qps / 1000.0;
++                const double avg_dco = valid_queries == 0 ? 0.0 : (static_cast<double>(index.metric_distance_computations) / static_cast<double>(valid_queries));
++                const double avg_hops = valid_queries == 0 ? 0.0 : (static_cast<double>(index.metric_hops) / static_cast<double>(valid_queries));
++                const double recall = valid_queries == 0 ? 0.0 : (recall_acc / static_cast<double>(valid_queries));
++
++                out << "irangegraph\t" << width << '\t' << ef << '\t'
++                    << cfg.build_seconds << '\t' << cfg.index_bytes << '\t' << cfg.space_usage_source << '\t'
++                    << recall << '\t' << avg_ms << '\t' << qps << '\t' << kpqs << '\t'
++                    << avg_dco << '\t' << avg_hops << '\t' << valid_queries << '\n';
++            }
++        }
++
++        return 0;
++    } catch (const std::invalid_argument &ex) {
++        printUsage();
++        std::cerr << "Argument error: " << ex.what() << std::endl;
++        return 1;
++    } catch (const std::exception &ex) {
++        std::cerr << "iRangeGraph run failed: " << ex.what() << std::endl;
++        return 1;
++    }
++}

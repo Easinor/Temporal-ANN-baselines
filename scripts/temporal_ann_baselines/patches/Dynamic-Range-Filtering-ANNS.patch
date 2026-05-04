@@ -1,0 +1,308 @@
+diff --git a/apps/CMakeLists.txt b/apps/CMakeLists.txt
+index ebf956d..fb3464c 100644
+--- a/apps/CMakeLists.txt
++++ b/apps/CMakeLists.txt
+@@ -14,6 +14,7 @@ endfunction()
+ add_dsg_app(generate_groundtruth_static static/generate_groundtruth_static.cc)
+ add_dsg_app(build_static_index static/build_static_index.cc)
+ add_dsg_app(query_static_index static/query_static_index.cc)
++add_dsg_app(query_annlib_index static/query_annlib_index.cc)
+ 
+ add_dsg_app(build_dynamic_index dynamic/build_dynamic_index.cc)
+ add_dsg_app(insert_and_query_dynamic_index dynamic/insert_and_query_dynamic_index.cc)
+diff --git a/apps/static/query_annlib_index.cc b/apps/static/query_annlib_index.cc
+new file mode 100644
+index 0000000..801d7f3
+--- /dev/null
++++ b/apps/static/query_annlib_index.cc
+@@ -0,0 +1,290 @@
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base_hnsw/hnswlib.h"
++#include "dsg.h"
++#include "data_wrapper.h"
++#include "flat_vectors.h"
++
++using namespace std::chrono;
++
++namespace {
++
++struct QueryConfig {
++    std::string data_path;
++    std::string query_path;
++    std::string index_path;
++    std::string artifacts_dir;
++    std::string output_path;
++    std::string space_usage_source = "unknown";
++    int data_size = 0;
++    int query_k = 10;
++    int M = 16;
++    double build_seconds = 0.0;
++    std::uint64_t index_bytes = 0;
++    std::vector<int> ranges;
++    std::vector<unsigned> search_ef_list;
++};
++
++std::vector<unsigned> parseList(const std::string &text) {
++    std::vector<unsigned> values;
++    std::stringstream ss(text);
++    std::string token;
++    while (std::getline(ss, token, ',')) {
++        if (!token.empty()) {
++            values.emplace_back(static_cast<unsigned>(std::stoul(token)));
++        }
++    }
++    return values;
++}
++
++std::vector<int> parseIntList(const std::string &text) {
++    std::vector<int> values;
++    std::stringstream ss(text);
++    std::string token;
++    while (std::getline(ss, token, ',')) {
++        if (!token.empty()) {
++            values.emplace_back(std::stoi(token));
++        }
++    }
++    return values;
++}
++
++QueryConfig parseArgs(int argc, char **argv) {
++    QueryConfig cfg;
++    for (int i = 1; i < argc; ++i) {
++        const std::string arg = argv[i];
++        auto require_value = [&](const char *flag) -> const char * {
++            if (i + 1 >= argc) {
++                throw std::invalid_argument(std::string("Missing value for ") + flag);
++            }
++            return argv[++i];
++        };
++        if (arg == "--data-path") {
++            cfg.data_path = require_value("--data-path");
++        } else if (arg == "--query-path") {
++            cfg.query_path = require_value("--query-path");
++        } else if (arg == "--index-path") {
++            cfg.index_path = require_value("--index-path");
++        } else if (arg == "--artifacts-dir") {
++            cfg.artifacts_dir = require_value("--artifacts-dir");
++        } else if (arg == "--output") {
++            cfg.output_path = require_value("--output");
++        } else if (arg == "--data-size") {
++            cfg.data_size = std::stoi(require_value("--data-size"));
++        } else if (arg == "--k") {
++            cfg.query_k = std::stoi(require_value("--k"));
++        } else if (arg == "--M") {
++            cfg.M = std::stoi(require_value("--M"));
++        } else if (arg == "--build-seconds") {
++            cfg.build_seconds = std::stod(require_value("--build-seconds"));
++        } else if (arg == "--index-bytes") {
++            cfg.index_bytes = static_cast<std::uint64_t>(std::stoull(require_value("--index-bytes")));
++        } else if (arg == "--space-usage-source") {
++            cfg.space_usage_source = require_value("--space-usage-source");
++        } else if (arg == "--ranges") {
++            cfg.ranges = parseIntList(require_value("--ranges"));
++        } else if (arg == "--search-ef-list") {
++            cfg.search_ef_list = parseList(require_value("--search-ef-list"));
++        } else if (arg == "-h" || arg == "--help") {
++            throw std::invalid_argument("usage");
++        }
++    }
++    if (cfg.data_path.empty() || cfg.query_path.empty() || cfg.index_path.empty() || cfg.artifacts_dir.empty() || cfg.output_path.empty()) {
++        throw std::invalid_argument("data-path, query-path, index-path, artifacts-dir, and output are required.");
++    }
++    if (cfg.data_size <= 0) {
++        throw std::invalid_argument("data-size is required and must be positive.");
++    }
++    if (cfg.ranges.empty()) {
++        throw std::invalid_argument("ranges is required.");
++    }
++    if (cfg.search_ef_list.empty()) {
++        cfg.search_ef_list = {16, 32, 48, 64, 96, 128, 160, 192, 224, 256, 300};
++    }
++    return cfg;
++}
++
++void printUsage() {
++    std::cout << "Usage: query_annlib_index --data-path <base_sorted.bin> --query-path <queries.bin> --index-path <index> "
++                 "--artifacts-dir <dir> --output <tsv> --data-size <N> --ranges <r1,r2,...> [--k 10] [--M 16] "
++                 "[--search-ef-list 16,32,64,...]\n";
++}
++
++FlatVectors<float> readDenseF32(const std::string &path) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in.is_open()) {
++        throw std::runtime_error("Cannot open vector file: " + path);
++    }
++    uint32_t count = 0;
++    uint32_t dim = 0;
++    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
++    in.read(reinterpret_cast<char *>(&dim), sizeof(uint32_t));
++    FlatVectors<float> values(count, dim);
++    in.read(reinterpret_cast<char *>(values.data()), sizeof(float) * count * dim);
++    return values;
++}
++
++std::vector<std::pair<int, int>> readRanges(const std::string &path) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in.is_open()) {
++        throw std::runtime_error("Cannot open range file: " + path);
++    }
++    uint32_t count = 0;
++    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
++    std::vector<std::pair<int, int>> bounds(count);
++    for (uint32_t i = 0; i < count; ++i) {
++        int32_t l = 0;
++        int32_t r = 0;
++        in.read(reinterpret_cast<char *>(&l), sizeof(int32_t));
++        in.read(reinterpret_cast<char *>(&r), sizeof(int32_t));
++        bounds[i] = {l, r};
++    }
++    return bounds;
++}
++
++FlatVectors<int> readGroundtruth(const std::string &path) {
++    std::ifstream in(path, std::ios::binary);
++    if (!in.is_open()) {
++        throw std::runtime_error("Cannot open groundtruth file: " + path);
++    }
++    uint32_t count = 0;
++    uint32_t topk = 0;
++    in.read(reinterpret_cast<char *>(&count), sizeof(uint32_t));
++    in.read(reinterpret_cast<char *>(&topk), sizeof(uint32_t));
++    FlatVectors<int> groundtruth(count, topk);
++    in.read(reinterpret_cast<char *>(groundtruth.data()), sizeof(int32_t) * count * topk);
++    return groundtruth;
++}
++
++double recallFromRow(const int *truth, size_t topk, const std::vector<int> &pred, size_t *valid_count) {
++    size_t valid = 0;
++    size_t hits = 0;
++    for (size_t i = 0; i < topk; ++i) {
++        const int value = truth[i];
++        if (value < 0) {
++            continue;
++        }
++        ++valid;
++        if (std::find(pred.begin(), pred.end(), value) != pred.end()) {
++            ++hits;
++        }
++    }
++    *valid_count = valid;
++    if (valid == 0) {
++        return 0.0;
++    }
++    return static_cast<double>(hits) / static_cast<double>(valid);
++}
++
++}  // namespace
++
++int main(int argc, char **argv) {
++    try {
++        const QueryConfig cfg = parseArgs(argc, argv);
++        const FlatVectors<float> base = readDenseF32(cfg.data_path);
++        const FlatVectors<float> queries = readDenseF32(cfg.query_path);
++        if (static_cast<int>(base.size()) != cfg.data_size) {
++            throw std::runtime_error("data-size does not match base vector count");
++        }
++        DataWrapper data_wrapper(static_cast<int>(queries.size()), cfg.query_k, "annlib", cfg.data_size);
++        data_wrapper.nodes = base;
++        data_wrapper.querys = queries;
++        data_wrapper.data_dim = queries.dim();
++
++        hnswlib::L2Space space(queries.dim());
++        dsg::DynamicSegmentGraph index(&space, &data_wrapper);
++        index.setQueryTopK(static_cast<unsigned>(cfg.query_k));
++        index.M = static_cast<unsigned>(cfg.M);
++        index.load(cfg.index_path);
++
++        std::ofstream out(cfg.output_path);
++        if (!out.is_open()) {
++            throw std::runtime_error("Cannot open output file: " + cfg.output_path);
++        }
++        out << "baseline\trange\tsearch_ef\tbuild_seconds\tspace_usage_bytes\tspace_usage_source\trecall\tavg_ms\tqps\tkpqs\tavg_hops\tavg_dist_calcs\tvalid_queries\n";
++        out << std::fixed << std::setprecision(6);
++
++        for (const int width : cfg.ranges) {
++            const auto bounds = readRanges(cfg.artifacts_dir + "/range" + std::to_string(width) + ".ranges.bin");
++            const auto groundtruth = readGroundtruth(cfg.artifacts_dir + "/range" + std::to_string(width) + ".gt.bin");
++            if (bounds.size() != queries.size() || groundtruth.size() != queries.size()) {
++                throw std::runtime_error("Query count mismatch for range " + std::to_string(width));
++            }
++
++            for (const unsigned search_ef : cfg.search_ef_list) {
++                index.setSearchEf(search_ef);
++                double recall_acc = 0.0;
++                double latency_acc = 0.0;
++                double hop_acc = 0.0;
++                double dist_acc = 0.0;
++                size_t valid_queries = 0;
++
++                for (size_t qid = 0; qid < queries.size(); ++qid) {
++                    const auto [l_bound, r_bound] = bounds[qid];
++                    if (l_bound > r_bound) {
++                        continue;
++                    }
++
++                    size_t valid_truth = 0;
++                    const int *truth_row = groundtruth[qid];
++                    for (int i = 0; i < cfg.query_k; ++i) {
++                        if (truth_row[i] >= 0) {
++                            ++valid_truth;
++                        }
++                    }
++                    if (valid_truth == 0) {
++                        continue;
++                    }
++
++                    const auto t0 = steady_clock::now();
++                    index.rangeSearch(queries[qid], {l_bound, r_bound});
++                    const auto t1 = steady_clock::now();
++
++                    std::vector<int> pred;
++                    pred.reserve(static_cast<size_t>(cfg.query_k));
++                    for (size_t i = 0; i < index.returned_nns.size() && pred.size() < static_cast<size_t>(cfg.query_k); ++i) {
++                        pred.emplace_back(index.returned_nns[i]);
++                    }
++
++                    size_t counted_truth = 0;
++                    recall_acc += recallFromRow(truth_row, static_cast<size_t>(cfg.query_k), pred, &counted_truth);
++                    latency_acc += duration<double>(t1 - t0).count();
++                    hop_acc += static_cast<double>(index.last_hop_count());
++                    dist_acc += static_cast<double>(index.last_distance_eval_count());
++                    ++valid_queries;
++                }
++
++                const double avg_ms = valid_queries == 0 ? 0.0 : (latency_acc * 1e3 / static_cast<double>(valid_queries));
++                const double qps = latency_acc <= 0.0 ? 0.0 : (static_cast<double>(valid_queries) / latency_acc);
++                const double kpqs = qps / 1000.0;
++                const double avg_hops = valid_queries == 0 ? 0.0 : (hop_acc / static_cast<double>(valid_queries));
++                const double avg_dist = valid_queries == 0 ? 0.0 : (dist_acc / static_cast<double>(valid_queries));
++                const double recall = valid_queries == 0 ? 0.0 : (recall_acc / static_cast<double>(valid_queries));
++
++                out << "dsg_static\t" << width << '\t' << search_ef << '\t'
++                    << cfg.build_seconds << '\t' << cfg.index_bytes << '\t' << cfg.space_usage_source << '\t'
++                    << recall << '\t' << avg_ms << '\t' << qps << '\t' << kpqs << '\t'
++                    << avg_hops << '\t' << avg_dist << '\t' << valid_queries << '\n';
++            }
++        }
++
++        return 0;
++    } catch (const std::invalid_argument &ex) {
++        printUsage();
++        std::cerr << "Argument error: " << ex.what() << std::endl;
++        return 1;
++    } catch (const std::exception &ex) {
++        std::cerr << "Query failed: " << ex.what() << std::endl;
++        return 1;
++    }
++}
