@@ -39,8 +39,8 @@ source "${script_dir}/datasets.sh"
 # done
 
 # Step 2: run each baseline
-# "${script_dir}/lib/run_rangefilteredann.sh"
-# "${script_dir}/lib/run_unify.sh"
+"${script_dir}/lib/run_rangefilteredann.sh"
+"${script_dir}/lib/run_unify.sh"
 "${script_dir}/lib/run_dsg.sh"
-# "${script_dir}/lib/run_serf.sh"
-# "${script_dir}/lib/run_irangegraph.sh"
+"${script_dir}/lib/run_serf.sh"
+"${script_dir}/lib/run_irangegraph.sh"

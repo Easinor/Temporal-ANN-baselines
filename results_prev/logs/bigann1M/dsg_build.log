@@ -1,0 +1,17 @@
+Load vecs from: /data/zwan018/TimeStampANN/baseline_cache/sorted_timerange/bigann1M/base_sorted.bin
+# of vecs: 1000000
+[DSG][static] dataset=annlib N=1000000 M=16 ef_construction=80 ef_max=300 alpha=1
+[DSG] Temporary HNSW built in 201.413 seconds.
+[DSG] Build-time support prune: using distance-weighted score support/|nbr-center|
+[DSG] Build-time support prune (per node, bottom 10% of prunable edges): pruned=14685318/166538482 (8.81797%), protected_edges=29707502 (|nbr-center| <= 20000), score=support/|nbr-center|, time=6.94654 s
+[DSG] Detailed breakdown:
+  KNN Search: 639.236 s
+  DFS Compress: 900.776 s
+  Store Edges: 7.27258 s
+[DSG][static] Build finished in 1780.47 seconds
+DynamicSegmentGraph Statistics:
+  Build Time: 1779.97 seconds
+  Total Edges: 151853164
+  Avg Forward NNs: 151.853
+  Avg Reverse NNs: 0
+[DSG][static] Index saved to /data/zwan018/TimeStampANN/baseline_cache/dsg/bigann1M/dsg.index
